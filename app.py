@@ -6,6 +6,8 @@ import os
 from sklearn.metrics import mean_squared_error
 import numpy as np
 import time
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 app = Flask(__name__)
 
@@ -35,6 +37,31 @@ def save_model(user_id, item_id, model):
 def is_model_exist(user_id, item_id):
     filename = f"./models/{user_id}/{item_id}.pkl"
     return os.path.exists(filename)
+
+# Get sales data
+def get_sales_data(user_id, item_id):
+    docs = db.collection("penjualan") \
+            .where("user_id", "==", user_id) \
+            .where("item_id", "==", item_id) \
+            .stream()
+    # sales_data = []
+    # for doc in docs:
+    #     data = doc.to_dict()
+    #     sales_data.append({
+    #         "tanggal": data["tanggal"],
+    #         "jumlah_terjual": data["jumlah_terjual"]
+    #     })
+    firestore_data = [doc.to_dict() for doc in docs]
+    data = prepare_firestore_data(firestore_data)
+    return data
+
+def prepare_firestore_data(firestore_docs):
+    # Konversi list of Firestore dicts ke DataFrame
+    df = pd.DataFrame(firestore_docs)
+    df['tanggal'] = pd.to_datetime(df['tanggal'], errors='coerce')
+    df = df.sort_values('tanggal')
+    df = df.dropna(subset=['tanggal'])
+    return df
 
 # Train XGBoost model
 def train_xgboost(user_id, item_id, df):
@@ -124,15 +151,16 @@ def train():
         user_id = param.get('user_id')
         item_id = param.get('item_id')
         
-        data = pd.read_csv('./data/dummy.csv', parse_dates=['tanggal'])  # Ambil data dari server Firebase
-        grouped_data = { (user, item): df.assign(tanggal=pd.to_datetime(df['tanggal'])) for (user, item), df in data.groupby(['user_id', 'item_id']) }
+        # data = pd.read_csv('./data/dummy.csv', parse_dates=['tanggal'])  # Ambil data dari server Firebase
+        data = get_sales_data(user_id, item_id)
+        # grouped_data = { (user, item): df.assign(tanggal=pd.to_datetime(df['tanggal'])) for (user, item), df in data.groupby(['user_id', 'item_id']) }
         
         if not is_model_exist(user_id, item_id):
             action = "trained"
-            val_rmse, train_time = train_xgboost(user_id, item_id, grouped_data[(user_id, item_id)])
+            val_rmse, train_time = train_xgboost(user_id, item_id, data)
         else:
             action = "updated"
-            val_rmse, train_time = update_model(user_id, item_id, grouped_data[(user_id, item_id)])
+            val_rmse, train_time = update_model(user_id, item_id, data)
         
         return jsonify({
             "status": "success",
@@ -152,14 +180,35 @@ def forecast():
         param = request.get_json()
         user_id = param.get('user_id')
         item_id = param.get('item_id')
+        future_days = param.get('future_days')
         
-        data = pd.read_csv('./data/dummy.csv', parse_dates=['tanggal'])  # Ambil data dari server Firebase
-        grouped_data = { (user, item): df.assign(tanggal=pd.to_datetime(df['tanggal'])) for (user, item), df in data.groupby(['user_id', 'item_id']) }
+        # data = pd.read_csv('./data/dummy.csv', parse_dates=['tanggal'])  # Ambil data dari server Firebase
+        data = get_sales_data(user_id, item_id)
+        # grouped_data = { (user, item): df.assign(tanggal=pd.to_datetime(df['tanggal'])) for (user, item), df in data.groupby(['user_id', 'item_id']) }
                 
-        prediction = predict_sales(user_id, item_id, grouped_data[(user_id, item_id)], future_days=7)
+        prediction = predict_sales(user_id, item_id, data, future_days)
         return jsonify({'forecast': prediction})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/test_get_sales", methods=["POST"])
+def test_get_sales():
+    data = request.get_json()
+    user_id = data.get("user_id")
+    item_id = data.get("item_id")
+
+    if not user_id or not item_id:
+        return jsonify({"error": "user_id and item_id are required"}), 400
+
+    try:
+        result = get_sales_data(user_id, item_id)
+        print(result)
+        return jsonify({"status": "success", "data": "DONE"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 if __name__ == '__main__':
+    cred = credentials.Certificate('private-key.json')
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
     app.run(debug=True)
