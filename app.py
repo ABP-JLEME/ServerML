@@ -8,8 +8,10 @@ import numpy as np
 import time
 import firebase_admin
 from firebase_admin import credentials, firestore
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Ensure directory exists
 def ensure_directory(path):
